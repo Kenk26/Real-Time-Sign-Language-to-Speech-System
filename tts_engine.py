@@ -30,37 +30,27 @@ except ImportError:
 
 
 class TTSEngine:
-    """Thread-safe, non-blocking text-to-speech engine.
-
-    Usage:
-        tts = TTSEngine()
-        tts.speak("Hello, how are you?")
-        tts.close()     # graceful shutdown
-    """
+    """Thread-safe, non-blocking text-to-speech engine."""
 
     def __init__(self, rate: int = 175, volume: float = 0.9,
                  voice_index: int = 0):
         self._queue: queue.Queue[str] = queue.Queue()
         self._running = True
-        self._backend = None
+        
+        # Save settings to apply later inside the thread
+        self._rate = rate
+        self._volume = volume
+        self._voice_index = voice_index
 
         if _PYTTSX3_OK:
             self._backend = "pyttsx3"
-            self._engine = pyttsx3.init()
-            self._engine.setProperty("rate", rate)
-            self._engine.setProperty("volume", volume)
-            voices = self._engine.getProperty("voices")
-            if voices and voice_index < len(voices):
-                self._engine.setProperty("voice", voices[voice_index].id)
-            print(f"[TTS] Using pyttsx3 (rate={rate}, volume={volume})")
+            print(f"[TTS] pyttsx3 selected (rate={rate}, volume={volume})")
         elif _GTTS_OK:
             self._backend = "gtts"
-            if _PYGAME_OK:
-                pygame.mixer.init()
             print("[TTS] Using gTTS (requires internet)")
         else:
-            print("[TTS] WARNING: No TTS library found. "
-                  "Install pyttsx3 or gTTS.")
+            self._backend = None
+            print("[TTS] WARNING: No TTS library found. Install pyttsx3 or gTTS.")
 
         # Dedicated worker thread
         self._thread = threading.Thread(
@@ -80,15 +70,33 @@ class TTSEngine:
         self._running = False
         self._queue.put("")    # unblock worker
         self._thread.join(timeout=3)
-        if self._backend == "pyttsx3":
-            try:
-                self._engine.stop()
-            except Exception:
-                pass
 
     # ── Worker ────────────────────────────────────────────────────────────
 
     def _worker(self):
+        # ⚠️ Windows Fix: COM objects (pyttsx3) MUST be initialized 
+        # inside the exact thread that uses them!
+        engine = None
+        
+        if self._backend == "pyttsx3":
+            # CoInitialize is required for COM multithreading on Windows
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+            except ImportError:
+                pass
+                
+            engine = pyttsx3.init()
+            engine.setProperty("rate", self._rate)
+            engine.setProperty("volume", self._volume)
+            voices = engine.getProperty("voices")
+            if voices and self._voice_index < len(voices):
+                engine.setProperty("voice", voices[self._voice_index].id)
+                
+        elif self._backend == "gtts":
+            if _PYGAME_OK:
+                pygame.mixer.init()
+
         while self._running:
             try:
                 text = self._queue.get(timeout=0.5)
@@ -96,38 +104,35 @@ class TTSEngine:
                 continue
             if not text:
                 continue
-            self._say(text)
+                
+            if self._backend == "pyttsx3":
+                try:
+                    engine.say(text)
+                    engine.runAndWait()
+                except Exception as e:
+                    print(f"[TTS] pyttsx3 error: {e}")
 
-    def _say(self, text: str):
-        if self._backend == "pyttsx3":
-            try:
-                self._engine.say(text)
-                self._engine.runAndWait()
-            except Exception as e:
-                print(f"[TTS] pyttsx3 error: {e}")
-
-        elif self._backend == "gtts":
-            try:
-                tts_obj = gTTS(text=text, lang="en", slow=False)
-                with tempfile.NamedTemporaryFile(
-                        suffix=".mp3", delete=False) as fp:
-                    tmp_path = fp.name
-                tts_obj.save(tmp_path)
-                if _PYGAME_OK:
-                    pygame.mixer.music.load(tmp_path)
-                    pygame.mixer.music.play()
-                    while pygame.mixer.music.get_busy():
-                        time.sleep(0.05)
-                else:
-                    # Last-resort: system command
-                    import subprocess
-                    subprocess.run(
-                        ["ffplay", "-nodisp", "-autoexit", tmp_path],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                os.unlink(tmp_path)
-            except Exception as e:
-                print(f"[TTS] gTTS error: {e}")
-        else:
-            print(f"[TTS] (no engine) Would say: {text}")
+            elif self._backend == "gtts":
+                try:
+                    tts_obj = gTTS(text=text, lang="en", slow=False)
+                    with tempfile.NamedTemporaryFile(
+                            suffix=".mp3", delete=False) as fp:
+                        tmp_path = fp.name
+                    tts_obj.save(tmp_path)
+                    if _PYGAME_OK:
+                        pygame.mixer.music.load(tmp_path)
+                        pygame.mixer.music.play()
+                        while pygame.mixer.music.get_busy():
+                            time.sleep(0.05)
+                    else:
+                        import subprocess
+                        subprocess.run(
+                            ["ffplay", "-nodisp", "-autoexit", tmp_path],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    os.unlink(tmp_path)
+                except Exception as e:
+                    print(f"[TTS] gTTS error: {e}")
+            else:
+                print(f"[TTS] (no engine) Would say: {text}")
