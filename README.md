@@ -1,195 +1,238 @@
-# Real-Time Sign Language → Speech System
-### Gesture Recognition · Emotion Detection · LLM Interpretation · TTS
+# 🤟 Sign Language to Speech System
+
+A real-time sign language recognition pipeline that captures hand gestures via webcam, classifies them using a deep learning model, interprets gesture sequences into natural English sentences via an LLM, and speaks them aloud using text-to-speech.
 
 ---
 
-## Architecture
+## ✨ Features
+
+- **Real-time hand tracking** using MediaPipe Tasks API (Hand Landmarker)
+- **Facial emotion detection** using MediaPipe Face Landmarker with optional DeepFace backend
+- **LSTM-based gesture classifier** trained on custom-collected sequences
+- **LLM-powered sentence construction** via LangChain + Ollama (Gemma)
+- **Text-to-speech output** using `pyttsx3` (offline) with `gTTS` fallback
+- **Interactive GUI** for live inference and feedback
+- **Full data collection + training pipeline** included
+
+---
+
+## 🗂️ Project Structure
 
 ```
-Webcam
-  │
-  ▼
-MediaPipe (Hands 21pts + Face Mesh)
-  │
-  ├─► Landmark Extraction (63 features)
-  │     └─► Sliding Window Buffer (30 frames)
-  │           └─► LSTM Model → Word Token + Confidence
-  │
-  └─► Emotion Detector → happy / sad / neutral / angry / surprised
-  
-Word Tokens ──┐
-Emotion      ─┤──► LangChain + Ollama (gemma4:31b-cloud)
-              │         └─► Natural Sentence
-              │
-              ├──► Subtitle Overlay (OpenCV UI)
-              └──► Text-to-Speech (pyttsx3 / gTTS)
+sign-language-to-speech/
+│
+├── collect_data.py          # Step 1 — Webcam data collection
+├── preprocess.py            # Step 2 — Landmark normalization & label encoding
+├── training_notebook.ipynb  # Step 3 — LSTM model training & evaluation
+│
+├── emotion_detector.py      # Facial emotion detection module
+├── llm_interpreter.py       # LLM-based gesture-to-sentence module
+├── tts_engine.py            # Text-to-speech engine (pyttsx3 / gTTS)
+├── gui.py                   # Main application GUI
+│
+├── dataset/                 # Auto-created during data collection
+├── processed/               # Auto-created during preprocessing
+│
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
-## Quick Start
+## ⚙️ Requirements
 
-### 1 · Install dependencies
+- **Python 3.10.8**
+- Webcam
+- [Ollama](https://ollama.com/) running locally (for LLM sentence interpretation)
+
+### Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2 · Pull Ollama model
-```bash
-# Lightweight (good for dev):
-ollama pull gemma3:1b
+> **Note:** To enable the richer DeepFace emotion backend, uncomment `deepface` in `requirements.txt` before installing (it is included by default in the current file).
 
-# Project spec (requires capable GPU / cloud):
-ollama pull gemma4:31b-cloud
+### Pull the Ollama model
+
+```bash
+ollama pull gemma4:31b-cloud # full model as per project specification
 ```
 
-### 3 · Collect training data
+---
+
+## 🚀 Quickstart
+
+### 1 — Collect gesture data
+
+Record sequences for each word/sign you want the model to recognise:
+
 ```bash
-# Collect 30 sequences of "hello"
-python 1_collect_data.py --word hello --sequences 30
-
-# Collect more words
-python 1_collect_data.py --word thanks --sequences 30
-python 1_collect_data.py --word yes    --sequences 30
-python 1_collect_data.py --word no     --sequences 30
-python 1_collect_data.py --word help   --sequences 30
+python collect_data.py --word "hello"  --sequences 30
+python collect_data.py --word "thanks" --sequences 30
+python collect_data.py --word "yes"    --sequences 30
 ```
-*Press **SPACE** before each recording. Dataset saved to `dataset/<word>/<seq_id>/<frame>.npy`*
 
-### 4 · Preprocess
+- Press **Space** to begin recording each sequence.
+- Press **Q** to quit early.
+- Each sequence captures **30 frames** of hand landmarks and saves them to `dataset/<word>/`.
+
+### 2 — Preprocess the dataset
+
 ```bash
-python 2_preprocess.py
+python preprocess.py
 ```
-Outputs: `processed/X_train.npy`, `X_test.npy`, `y_train.npy`, `y_test.npy`, `label_map.json`
 
-### 5 · Train LSTM model
-```bash
-python 3_train_model.py
-```
-Outputs: `models/sign_model.keras`, `models/model_meta.json`, `models/training_curves.png`
+Outputs to `processed/`:
+| File | Description |
+|---|---|
+| `X_train.npy` | Training sequences `(N, 30, 126)` |
+| `X_test.npy` | Test sequences |
+| `y_train.npy` | One-hot encoded labels |
+| `y_test.npy` | One-hot encoded labels |
+| `label_map.json` | Index → word mapping |
 
-Or use the Jupyter notebook:
+### 3 — Train the model
+
+Open and run `training_notebook.ipynb` in Jupyter:
+
 ```bash
 jupyter notebook training_notebook.ipynb
 ```
 
-### 6 · Run real-time system
+### 4 — Launch the application
+
 ```bash
-# With default lightweight LLM:
-python 4_realtime.py
-
-# With project-spec model:
-python 4_realtime.py --llm-model gemma4:31b-cloud
-
-# Custom confidence / pause:
-python 4_realtime.py --threshold 0.75 --pause 2.0
+python gui.py
 ```
 
 ---
 
-## Keyboard Controls (real-time mode)
-
-| Key | Action |
-|-----|--------|
-| `SPACE` | Flush current token buffer to LLM immediately |
-| `C` | Clear tokens and current sentence |
-| `Q` | Quit |
-
----
-
-## File Structure
+## 🧠 System Architecture
 
 ```
-sign_language_system/
-├── 1_collect_data.py       # webcam data collection
-├── 2_preprocess.py         # normalize + encode + split
-├── 3_train_model.py        # LSTM training script
-├── 4_realtime.py           # main real-time inference
-├── emotion_detector.py     # MediaPipe / DeepFace emotion module
-├── llm_interpreter.py      # LangChain + Ollama integration
-├── tts_engine.py           # pyttsx3 / gTTS TTS engine
-├── training_notebook.ipynb # Jupyter training notebook
-├── requirements.txt        # Python dependencies
-│
-├── dataset/                # created by 1_collect_data.py
-│   ├── hello/
-│   │   ├── 0/   0.npy … 29.npy
-│   │   └── 1/   …
-│   └── thanks/  …
-│
-├── processed/              # created by 2_preprocess.py
-│   ├── X_train.npy
-│   ├── X_test.npy
-│   ├── y_train.npy
-│   ├── y_test.npy
-│   └── label_map.json
-│
-└── models/                 # created by 3_train_model.py
-    ├── sign_model.keras
-    ├── model_meta.json
-    ├── best_model.weights.h5
-    └── training_curves.png
+Webcam Feed
+    │
+    ├──▶ HandLandmarker (MediaPipe Tasks API)
+    │         └──▶ 126-dim landmark vector (Left + Right hand)
+    │                   └──▶ LSTM Classifier ──▶ Gesture Token
+    │
+    ├──▶ FaceLandmarker (MediaPipe Tasks API)
+    │         └──▶ Geometric heuristics / DeepFace
+    │                   └──▶ Emotion Label
+    │
+    └──▶ LLMInterpreter (LangChain + Ollama / Gemma)
+              └──▶ Natural English Sentence
+                        └──▶ TTSEngine (pyttsx3 / gTTS)
+                                  └──▶ 🔊 Speech Output
 ```
 
 ---
 
-## Model Details
+## 📐 Landmark Format
 
-| Property | Value |
-|----------|-------|
-| Input shape | `(30, 63)` — 30 frames × 21 landmarks × 3 coords |
-| Layer 1 | LSTM(64, return_sequences=True) + BatchNorm |
-| Layer 2 | LSTM(64) + BatchNorm |
-| Dense | 64 ReLU → Dropout(0.3) → 32 ReLU → Dropout(0.2) |
-| Output | Softmax(num_classes) |
-| Optimizer | Adam(lr=1e-3) |
-| Loss | categorical_crossentropy |
-| Epochs | 50 (EarlyStopping patience=10) |
-| Batch | 16 |
+Each frame is represented as a **126-dimensional vector**:
+- **[0–62]** — Left hand: 21 landmarks × 3 (x, y, z), normalized relative to wrist
+- **[63–125]** — Right hand: 21 landmarks × 3 (x, y, z), normalized relative to wrist
+
+Missing hands are zero-padded.
 
 ---
 
-## LLM Prompt Template
+## 🎭 Emotion Detection
 
+The `EmotionDetector` class supports two backends:
+
+| Backend | Description | Requirement |
+|---|---|---|
+| **MediaPipe heuristics** (default) | Geometric ratios from face landmarks | None |
+| **DeepFace** | Deep learning emotion classifier | `pip install deepface` |
+
+Detected emotions: `neutral`, `happy`, `sad`, `angry`, `surprised`
+
+---
+
+## 🗣️ LLM Interpretation
+
+`LLMInterpreter` converts a list of gesture tokens and an emotion into a grammatically correct sentence:
+
+```python
+from llm_interpreter import LLMInterpreter
+
+llm = LLMInterpreter(model="gemma4:31b-cloud")
+
+# Synchronous
+sentence = llm.interpret(["hello", "how", "you"], emotion="happy")
+# → "Hello! How are you?"
+
+# Asynchronous (non-blocking)
+llm.interpret_async(["thank", "you"], emotion="neutral",
+                    callback=lambda s: print(s))
 ```
-Convert sign language gesture tokens into a single, natural English sentence.
 
-Words: {tokens}
-Emotion: {emotion}
+If Ollama is unavailable, the module falls back to a simple rule-based capitalizer automatically.
 
-Rules:
-- Fix grammar and word order
-- Maintain the original meaning
-- Reflect the emotion subtly in tone if appropriate
-- Return ONLY the final sentence
+---
+
+## 🔊 TTS Engine
+
+`TTSEngine` queues speech output in a background daemon thread — it never blocks the main loop.
+
+```python
+from tts_engine import TTSEngine
+
+tts = TTSEngine(rate=175, volume=0.9)
+tts.speak("Hello, how are you?")
+tts.close()
 ```
 
----
-
-## Performance Tips
-
-- **GPU**: TensorFlow will auto-use CUDA if available
-- **Confidence threshold**: Lower `--threshold` (e.g. `0.65`) if predictions miss; raise if noisy
-- **Pause detection**: Adjust `--pause` to match your signing speed
-- **LLM latency**: Use `gemma3:1b` on CPU; `gemma4:31b-cloud` needs a GPU or cloud endpoint
-- **Threading**: LLM calls run in daemon threads — UI never blocks
+| Backend | Requirement | Network |
+|---|---|---|
+| `pyttsx3` (preferred) | `pip install pyttsx3` | Offline |
+| `gTTS` (fallback) | `pip install gTTS pygame` | Online |
 
 ---
 
-## Extending
+## 🛠️ Configuration
 
-### Add new gestures
+Key constants can be adjusted at the top of each module:
+
+| Constant | File | Default | Description |
+|---|---|---|---|
+| `SEQUENCE_LENGTH` | `collect_data.py`, `preprocess.py` | `30` | Frames per gesture |
+| `DATASET_DIR` | `collect_data.py`, `preprocess.py` | `"dataset"` | Raw data path |
+| `PROCESSED_DIR` | `preprocess.py` | `"processed"` | Processed data path |
+| `model` | `llm_interpreter.py` | `"gemma4:31b-cloud"` | Ollama model name |
+| `smoothing` | `emotion_detector.py` | `10` | Emotion smoothing window |
+
+---
+
+## 🐛 Troubleshooting
+
+**Webcam not opening**
+```
+RuntimeError: Cannot open webcam.
+```
+Check that no other application is using the camera and that your device index is correct (default is `0`).
+
+**MediaPipe model not found**
+The `.task` model files are downloaded automatically on first run. Ensure you have an active internet connection during the initial launch.
+
+**Ollama not responding**
+Make sure the Ollama daemon is running:
 ```bash
-python 1_collect_data.py --word <new_word> --sequences 40
-python 2_preprocess.py
-python 3_train_model.py
+ollama serve
 ```
+The system will fall back to rule-based interpretation if Ollama is unreachable.
 
-### Enable DeepFace emotions
+**pyttsx3 errors on Windows**
+The engine is initialized inside its worker thread to avoid COM threading issues. If problems persist, try installing `pywin32`:
 ```bash
-pip install deepface
+pip install pywin32
 ```
-Then in `4_realtime.py`, pass `use_deepface=True` to `EmotionDetector`.
 
-### Conversation history
-`conversation_history` list in `4_realtime.py` keeps the last 5 LLM outputs and displays them in the overlay.
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License**.
