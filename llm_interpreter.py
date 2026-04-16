@@ -7,10 +7,11 @@ raw gesture tokens + emotion into a natural, grammatically-correct sentence.
 import threading
 from typing import Callable, Optional
 
-# LangChain imports (langchain + langchain-community)
-from langchain_community.llms import Ollama
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+# ── LangChain imports ────────────────────────────────────────────────────────
+from langchain_ollama import ChatOllama                      # ✅ correct class
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser   # ✅ for runnables
+# LLMChain removed — replaced by LCEL pipe (prompt | llm | parser)
 
 # ── Prompt template ──────────────────────────────────────────────────────────
 PROMPT_TEMPLATE = PromptTemplate(
@@ -65,13 +66,14 @@ class LLMInterpreter:
         self._busy = False
 
         try:
-            llm = Ollama(
+            llm = ChatOllama(                                # ✅ ChatOllama
                 model=model,
                 base_url=base_url,
                 temperature=temperature,
                 timeout=timeout,
             )
-            self._chain = LLMChain(llm=llm, prompt=PROMPT_TEMPLATE)
+            # ✅ LCEL runnable chain — replaces deprecated LLMChain
+            self._chain = PROMPT_TEMPLATE | llm | StrOutputParser()
             print(f"[LLMInterpreter] Connected to Ollama model '{model}'.")
         except Exception as e:
             print(f"[LLMInterpreter] WARNING: Could not connect to Ollama "
@@ -91,12 +93,10 @@ class LLMInterpreter:
             return self._fallback(tokens, emotion)
 
         try:
-            result = self._chain.invoke(
+            # ✅ Runnable returns str directly via StrOutputParser
+            sentence = self._chain.invoke(
                 {"tokens": token_str, "emotion": emotion}
-            )
-            sentence = (result.get("text") or "").strip()
-            # Strip any stray quotes the model may add
-            sentence = sentence.strip('"').strip("'")
+            ).strip().strip('"').strip("'")
             return sentence if sentence else self._fallback(tokens, emotion)
         except Exception as e:
             print(f"[LLMInterpreter] Inference error: {e}")
@@ -108,7 +108,6 @@ class LLMInterpreter:
                         callback: Optional[Callable[[str], None]] = None):
         """Non-blocking interpretation. Result delivered via callback."""
         if self._busy:
-            # Drop request if LLM already busy (avoid queue build-up)
             return
 
         def _run():

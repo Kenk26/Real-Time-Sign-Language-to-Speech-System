@@ -1,7 +1,11 @@
 """
 Step 1: Data Collection
-Captures webcam video, detects hand landmarks using MediaPipe,
+Captures webcam video, detects hand landmarks using MediaPipe Tasks API,
 stores sequences of 30 frames as .npy files.
+
+Uses the same MediaPipe Tasks API as gesture_controller.py
+(mediapipe.tasks.python.vision.HandLandmarker) instead of the legacy
+mp.solutions.hands API.
 
 Usage:
     python 1_collect_data.py --word "hello" --sequences 30
@@ -12,57 +16,107 @@ Usage:
 import cv2
 import numpy as np
 import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 import os
 import argparse
 import time
+import urllib.request
 
-# ── MediaPipe setup ──────────────────────────────────────────────────────────
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_face_mesh = mp.solutions.face_mesh
+# ── MediaPipe model setup ────────────────────────────────────────────────────
+MEDIAPIPE_MODEL_PATH = "hand_landmarker.task"
+MEDIAPIPE_MODEL_URL  = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+)
 
-SEQUENCE_LENGTH = 30          # frames per gesture sequence
-DATASET_DIR = "dataset"       # root folder for .npy files
+SEQUENCE_LENGTH = 30      # frames per gesture sequence
+DATASET_DIR     = "dataset"
+
+# Skeleton connections for drawing (matches gesture_controller.py)
+CONNECTIONS = [
+    (0,1),(1,2),(2,3),(3,4),
+    (0,5),(5,6),(6,7),(7,8),
+    (0,9),(9,10),(10,11),(11,12),
+    (0,13),(13,14),(14,15),(15,16),
+    (0,17),(17,18),(18,19),(19,20),
+    (5,9),(9,13),(13,17),(5,17)
+]
 
 
-def extract_hand_landmarks(results) -> np.ndarray:
-    """Return flattened 63-dim vector (21 pts × 3 coords).
-    If no hand detected, returns zeros."""
-    if results.multi_hand_landmarks:
-        hand = results.multi_hand_landmarks[0]
-        lm = np.array([[p.x, p.y, p.z] for p in hand.landmark])  # (21,3)
-        # Normalize relative to wrist (landmark 0)
-        wrist = lm[0]
-        lm -= wrist
-        return lm.flatten()  # (63,)
-    return np.zeros(63)
+def download_model():
+    """Download the MediaPipe hand landmarker model if not present."""
+    if not os.path.exists(MEDIAPIPE_MODEL_PATH):
+        print("Downloading hand landmarker model (~13 MB)...")
+        urllib.request.urlretrieve(MEDIAPIPE_MODEL_URL, MEDIAPIPE_MODEL_PATH)
+        print("  Model downloaded.")
+
+
+def create_detector():
+    """Create and return a MediaPipe HandLandmarker (Tasks API)."""
+    base_options = python.BaseOptions(model_asset_path=MEDIAPIPE_MODEL_PATH)
+    options = vision.HandLandmarkerOptions(
+        base_options=base_options,
+        num_hands=1,
+        min_hand_detection_confidence=0.7,
+        min_tracking_confidence=0.5,
+    )
+    return vision.HandLandmarker.create_from_options(options)
+
+
+def extract_hand_landmarks(result) -> np.ndarray:
+    """
+    Return a flattened 63-dim vector (21 pts × 3 coords).
+    Normalised relative to wrist (landmark 0) — matches gesture_controller.py.
+    If no hand detected, returns zeros.
+    """
+    if result.hand_landmarks:
+        lms = result.hand_landmarks[0]
+        base_x, base_y, base_z = lms[0].x, lms[0].y, lms[0].z
+        coords = []
+        for lm in lms:
+            coords.append(lm.x - base_x)
+            coords.append(lm.y - base_y)
+            coords.append(lm.z - base_z)
+        return np.array(coords, dtype=np.float32)   # (63,)
+    return np.zeros(63, dtype=np.float32)
+
+
+def draw_skeleton(frame, lms, color=(0, 255, 180)):
+    """Draw hand landmarks and connections onto frame."""
+    h, w = frame.shape[:2]
+    pts = [(int(lm.x * w), int(lm.y * h)) for lm in lms]
+
+    for a, b in CONNECTIONS:
+        cv2.line(frame, pts[a], pts[b], (255, 255, 255), 1)
+    for x, y in pts:
+        cv2.circle(frame, (x, y), 3, color, -1)
 
 
 def collect_word(word: str, num_sequences: int = 30):
+    download_model()
+
     save_dir = os.path.join(DATASET_DIR, word)
     os.makedirs(save_dir, exist_ok=True)
 
     # Find next sequence index
-    existing = [int(f) for f in os.listdir(save_dir) if f.isdigit()]
+    existing  = [int(f) for f in os.listdir(save_dir) if f.isdigit()]
     start_idx = max(existing) + 1 if existing else 0
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Cannot open webcam.")
 
-    with mp_hands.Hands(
-        max_num_hands=1,
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.5,
-    ) as hands:
+    detector = create_detector()
 
-        print(f"\n[INFO] Collecting '{word}' — {num_sequences} sequences "
-              f"(starting at index {start_idx})")
-        print("[INFO] Press SPACE to start each sequence, Q to quit.\n")
+    print(f"\n[INFO] Collecting '{word}' — {num_sequences} sequences "
+          f"(starting at index {start_idx})")
+    print("[INFO] Press SPACE to start each sequence, Q to quit.\n")
 
-        seq_idx = start_idx
-        collected = 0
+    seq_idx   = start_idx
+    collected = 0
 
+    try:
         while collected < num_sequences:
             # ── Countdown / ready screen ─────────────────────────────────
             waiting = True
@@ -71,6 +125,14 @@ def collect_word(word: str, num_sequences: int = 30):
                 if not ret:
                     break
                 frame = cv2.flip(frame, 1)
+
+                # Run detector so we can show live skeleton while waiting
+                rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                result = detector.detect(mp_img)
+                if result.hand_landmarks:
+                    draw_skeleton(frame, result.hand_landmarks[0])
+
                 overlay = frame.copy()
                 cv2.rectangle(overlay, (0, 0), (frame.shape[1], 80),
                               (20, 20, 20), -1)
@@ -83,17 +145,15 @@ def collect_word(word: str, num_sequences: int = 30):
                             (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                             (200, 200, 200), 1)
                 cv2.imshow("Data Collection", frame)
+
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord(" "):
                     waiting = False
                 elif key == ord("q"):
-                    cap.release()
-                    cv2.destroyAllWindows()
                     print("[INFO] Quit.")
                     return
 
             # ── Record sequence ──────────────────────────────────────────
-            sequence = []
             seq_save_dir = os.path.join(save_dir, str(seq_idx))
             os.makedirs(seq_save_dir, exist_ok=True)
 
@@ -102,30 +162,25 @@ def collect_word(word: str, num_sequences: int = 30):
                 if not ret:
                     break
                 frame = cv2.flip(frame, 1)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = hands.process(rgb)
 
-                # Draw landmarks
-                if results.multi_hand_landmarks:
-                    for hl in results.multi_hand_landmarks:
-                        mp_drawing.draw_landmarks(
-                            frame, hl, mp_hands.HAND_CONNECTIONS,
-                            mp_drawing.DrawingSpec(
-                                color=(0, 255, 180), thickness=2,
-                                circle_radius=3),
-                            mp_drawing.DrawingSpec(
-                                color=(255, 255, 255), thickness=1),
-                        )
+                # Detect with Tasks API
+                rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                result = detector.detect(mp_img)
 
-                landmarks = extract_hand_landmarks(results)
-                sequence.append(landmarks)
+                # Draw skeleton
+                if result.hand_landmarks:
+                    draw_skeleton(frame, result.hand_landmarks[0])
+
+                landmarks = extract_hand_landmarks(result)
 
                 # Save individual frame
                 np.save(os.path.join(seq_save_dir, str(frame_num)), landmarks)
 
                 # Progress bar
                 progress = int((frame_num + 1) / SEQUENCE_LENGTH * 200)
-                cv2.rectangle(frame, (10, frame.shape[0] - 30),
+                cv2.rectangle(frame,
+                              (10, frame.shape[0] - 30),
                               (10 + progress, frame.shape[0] - 10),
                               (0, 255, 100), -1)
                 cv2.putText(frame,
@@ -137,12 +192,15 @@ def collect_word(word: str, num_sequences: int = 30):
                 cv2.waitKey(1)
 
             print(f"  ✓ Sequence {seq_idx} saved ({SEQUENCE_LENGTH} frames)")
-            seq_idx += 1
+            seq_idx   += 1
             collected += 1
             time.sleep(0.3)
 
-    cap.release()
-    cv2.destroyAllWindows()
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        detector.close()
+
     print(f"\n[DONE] Collected {collected} sequences for '{word}'.")
     print(f"       Saved to: {os.path.abspath(save_dir)}")
 
