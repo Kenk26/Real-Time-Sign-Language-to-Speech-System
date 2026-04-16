@@ -1,0 +1,157 @@
+"""
+Step 1: Data Collection
+Captures webcam video, detects hand landmarks using MediaPipe,
+stores sequences of 30 frames as .npy files.
+
+Usage:
+    python 1_collect_data.py --word "hello" --sequences 30
+    python 1_collect_data.py --word "thanks" --sequences 30
+    python 1_collect_data.py --word "yes" --sequences 30
+"""
+
+import cv2
+import numpy as np
+import mediapipe as mp
+import os
+import argparse
+import time
+
+# ── MediaPipe setup ──────────────────────────────────────────────────────────
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+mp_face_mesh = mp.solutions.face_mesh
+
+SEQUENCE_LENGTH = 30          # frames per gesture sequence
+DATASET_DIR = "dataset"       # root folder for .npy files
+
+
+def extract_hand_landmarks(results) -> np.ndarray:
+    """Return flattened 63-dim vector (21 pts × 3 coords).
+    If no hand detected, returns zeros."""
+    if results.multi_hand_landmarks:
+        hand = results.multi_hand_landmarks[0]
+        lm = np.array([[p.x, p.y, p.z] for p in hand.landmark])  # (21,3)
+        # Normalize relative to wrist (landmark 0)
+        wrist = lm[0]
+        lm -= wrist
+        return lm.flatten()  # (63,)
+    return np.zeros(63)
+
+
+def collect_word(word: str, num_sequences: int = 30):
+    save_dir = os.path.join(DATASET_DIR, word)
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Find next sequence index
+    existing = [int(f) for f in os.listdir(save_dir) if f.isdigit()]
+    start_idx = max(existing) + 1 if existing else 0
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Cannot open webcam.")
+
+    with mp_hands.Hands(
+        max_num_hands=1,
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.5,
+    ) as hands:
+
+        print(f"\n[INFO] Collecting '{word}' — {num_sequences} sequences "
+              f"(starting at index {start_idx})")
+        print("[INFO] Press SPACE to start each sequence, Q to quit.\n")
+
+        seq_idx = start_idx
+        collected = 0
+
+        while collected < num_sequences:
+            # ── Countdown / ready screen ─────────────────────────────────
+            waiting = True
+            while waiting:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame = cv2.flip(frame, 1)
+                overlay = frame.copy()
+                cv2.rectangle(overlay, (0, 0), (frame.shape[1], 80),
+                              (20, 20, 20), -1)
+                cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+                cv2.putText(frame,
+                            f"Word: '{word}' | Seq {collected+1}/{num_sequences}",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                            (0, 255, 180), 2)
+                cv2.putText(frame, "Press SPACE to record",
+                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                            (200, 200, 200), 1)
+                cv2.imshow("Data Collection", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord(" "):
+                    waiting = False
+                elif key == ord("q"):
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    print("[INFO] Quit.")
+                    return
+
+            # ── Record sequence ──────────────────────────────────────────
+            sequence = []
+            seq_save_dir = os.path.join(save_dir, str(seq_idx))
+            os.makedirs(seq_save_dir, exist_ok=True)
+
+            for frame_num in range(SEQUENCE_LENGTH):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame = cv2.flip(frame, 1)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = hands.process(rgb)
+
+                # Draw landmarks
+                if results.multi_hand_landmarks:
+                    for hl in results.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(
+                            frame, hl, mp_hands.HAND_CONNECTIONS,
+                            mp_drawing.DrawingSpec(
+                                color=(0, 255, 180), thickness=2,
+                                circle_radius=3),
+                            mp_drawing.DrawingSpec(
+                                color=(255, 255, 255), thickness=1),
+                        )
+
+                landmarks = extract_hand_landmarks(results)
+                sequence.append(landmarks)
+
+                # Save individual frame
+                np.save(os.path.join(seq_save_dir, str(frame_num)), landmarks)
+
+                # Progress bar
+                progress = int((frame_num + 1) / SEQUENCE_LENGTH * 200)
+                cv2.rectangle(frame, (10, frame.shape[0] - 30),
+                              (10 + progress, frame.shape[0] - 10),
+                              (0, 255, 100), -1)
+                cv2.putText(frame,
+                            f"Recording {frame_num+1}/{SEQUENCE_LENGTH}",
+                            (10, frame.shape[0] - 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            (0, 220, 255), 2)
+                cv2.imshow("Data Collection", frame)
+                cv2.waitKey(1)
+
+            print(f"  ✓ Sequence {seq_idx} saved ({SEQUENCE_LENGTH} frames)")
+            seq_idx += 1
+            collected += 1
+            time.sleep(0.3)
+
+    cap.release()
+    cv2.destroyAllWindows()
+    print(f"\n[DONE] Collected {collected} sequences for '{word}'.")
+    print(f"       Saved to: {os.path.abspath(save_dir)}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--word", required=True,
+                        help="Sign language word/gesture label")
+    parser.add_argument("--sequences", type=int, default=30,
+                        help="Number of sequences to collect (default: 30)")
+    args = parser.parse_args()
+    collect_word(args.word, args.sequences)
