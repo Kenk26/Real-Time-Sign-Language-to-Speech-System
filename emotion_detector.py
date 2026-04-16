@@ -1,6 +1,6 @@
 """
 Emotion Detection Module
-Uses MediaPipe Face Mesh to extract facial landmarks and heuristics,
+Uses MediaPipe FaceLandmarker (Tasks API) to extract facial landmarks and heuristics,
 with optional fallback to DeepFace for richer classification.
 
 Exported:
@@ -9,8 +9,14 @@ Exported:
 
 import numpy as np
 import cv2
+import os
+import urllib.request
 from collections import deque
 import threading
+
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
 # Try optional heavy model (DeepFace); gracefully fall back to landmark heuristics
 try:
@@ -19,9 +25,19 @@ try:
 except ImportError:
     _DEEPFACE_AVAILABLE = False
 
-import mediapipe as mp
+# ── MediaPipe model setup ────────────────────────────────────────────────────
+MEDIAPIPE_FACE_MODEL_PATH = "face_landmarker.task"
+MEDIAPIPE_FACE_MODEL_URL  = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+)
 
-mp_face_mesh = mp.solutions.face_mesh
+def _download_face_model():
+    """Download the MediaPipe face landmarker model if not present."""
+    if not os.path.exists(MEDIAPIPE_FACE_MODEL_PATH):
+        print("[EmotionDetector] Downloading Face Landmarker model (~2.6 MB)...")
+        urllib.request.urlretrieve(MEDIAPIPE_FACE_MODEL_URL, MEDIAPIPE_FACE_MODEL_PATH)
+        print("[EmotionDetector] Face model downloaded.")
 
 # ── Landmark indices relevant to expression ──────────────────────────────────
 # Mouth corners
@@ -87,7 +103,7 @@ def _heuristic_emotion(landmarks) -> str:
 
 
 class EmotionDetector:
-    """Thread-safe, low-overhead emotion detector.
+    """Thread-safe, low-overhead emotion detector using Tasks API.
 
     Usage:
         detector = EmotionDetector()
@@ -96,12 +112,19 @@ class EmotionDetector:
     """
 
     def __init__(self, smoothing: int = 10, use_deepface: bool = False):
-        self._face_mesh = mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
+        _download_face_model()
+        
+        base_options = python.BaseOptions(model_asset_path=MEDIAPIPE_FACE_MODEL_PATH)
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            output_face_blendshapes=False,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
         )
+        self._face_landmarker = vision.FaceLandmarker.create_from_options(options)
+        
         self._history: deque = deque(maxlen=smoothing)
         self._current = "neutral"
         self._lock = threading.Lock()
@@ -112,18 +135,22 @@ class EmotionDetector:
         if self._use_deepface:
             print("[EmotionDetector] Using DeepFace backend.")
         else:
-            print("[EmotionDetector] Using MediaPipe heuristic backend.")
+            print("[EmotionDetector] Using MediaPipe Tasks API heuristic backend.")
 
     def update(self, bgr_frame: np.ndarray) -> str:
         """Process a BGR frame and return smoothed emotion string."""
         self._frame_counter += 1
         rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-        result = self._face_mesh.process(rgb)
+        
+        # Convert to MediaPipe Image
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._face_landmarker.detect(mp_img)
 
         raw_emotion = "neutral"
 
-        if result.multi_face_landmarks:
-            face_lm = result.multi_face_landmarks[0].landmark
+        if result.face_landmarks:
+            # FaceLandmarker returns a list of faces, each is a list of NormalizedLandmarks
+            face_lm = result.face_landmarks[0]
 
             if self._use_deepface and self._frame_counter % self._deepface_interval == 0:
                 try:
@@ -161,4 +188,4 @@ class EmotionDetector:
             return self._current
 
     def close(self):
-        self._face_mesh.close()
+        self._face_landmarker.close()

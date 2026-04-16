@@ -47,7 +47,7 @@ class LLMInterpreter:
     """
 
     def __init__(self,
-                 model: str = "gemma3:1b",
+                 model: str = "gemma4:31b-cloud",
                  base_url: str = "http://localhost:11434",
                  temperature: float = 0.4,
                  timeout: int = 30):
