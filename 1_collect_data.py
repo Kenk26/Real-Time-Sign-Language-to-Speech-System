@@ -57,7 +57,7 @@ def create_detector():
     base_options = python.BaseOptions(model_asset_path=MEDIAPIPE_MODEL_PATH)
     options = vision.HandLandmarkerOptions(
         base_options=base_options,
-        num_hands=1,
+        num_hands=2,
         min_hand_detection_confidence=0.7,
         min_tracking_confidence=0.5,
     )
@@ -66,20 +66,41 @@ def create_detector():
 
 def extract_hand_landmarks(result) -> np.ndarray:
     """
-    Return a flattened 63-dim vector (21 pts × 3 coords).
-    Normalised relative to wrist (landmark 0) — matches gesture_controller.py.
-    If no hand detected, returns zeros.
+    Extracts landmarks for both hands (Left and Right).
+    Returns a flattened 126-dim vector (63 for Left, 63 for Right).
+    Missing hands are padded with zeros. Includes a safeguard for MediaPipe glitches.
     """
+    lh = np.zeros(63, dtype=np.float32)
+    rh = np.zeros(63, dtype=np.float32)
+
     if result.hand_landmarks:
-        lms = result.hand_landmarks[0]
-        base_x, base_y, base_z = lms[0].x, lms[0].y, lms[0].z
-        coords = []
-        for lm in lms:
-            coords.append(lm.x - base_x)
-            coords.append(lm.y - base_y)
-            coords.append(lm.z - base_z)
-        return np.array(coords, dtype=np.float32)   # (63,)
-    return np.zeros(63, dtype=np.float32)
+        for idx, hand_info in enumerate(result.handedness):
+            label = hand_info[0].category_name  # Usually "Left" or "Right"
+            lms = result.hand_landmarks[idx]
+            
+            # Normalize relative to wrist (landmark 0)
+            base_x, base_y, base_z = lms[0].x, lms[0].y, lms[0].z
+            coords = []
+            for lm in lms:
+                coords.append(lm.x - base_x)
+                coords.append(lm.y - base_y)
+                coords.append(lm.z - base_z)
+            
+            coords_array = np.array(coords, dtype=np.float32)
+            
+            # Safeguard: if label is "Left" but lh is already filled, put it in rh
+            if label == "Left":
+                if np.all(lh == 0): # If lh is empty
+                    lh = coords_array
+                else:               # MediaPipe glitched and found two Lefts
+                    rh = coords_array
+            else:
+                if np.all(rh == 0): # If rh is empty
+                    rh = coords_array
+                else:               # MediaPipe glitched and found two Rights
+                    lh = coords_array
+
+    return np.concatenate([lh, rh])
 
 
 def draw_skeleton(frame, lms, color=(0, 255, 180)):
@@ -131,7 +152,8 @@ def collect_word(word: str, num_sequences: int = 30):
                 mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 result = detector.detect(mp_img)
                 if result.hand_landmarks:
-                    draw_skeleton(frame, result.hand_landmarks[0])
+                    for hand_lms in result.hand_landmarks:
+                        draw_skeleton(frame, hand_lms)
 
                 overlay = frame.copy()
                 cv2.rectangle(overlay, (0, 0), (frame.shape[1], 80),
@@ -169,8 +191,10 @@ def collect_word(word: str, num_sequences: int = 30):
                 result = detector.detect(mp_img)
 
                 # Draw skeleton
+                # Inside the recording loops (waiting and recording):
                 if result.hand_landmarks:
-                    draw_skeleton(frame, result.hand_landmarks[0])
+                    for hand_lms in result.hand_landmarks:
+                        draw_skeleton(frame, hand_lms)
 
                 landmarks = extract_hand_landmarks(result)
 
